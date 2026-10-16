@@ -1,0 +1,10 @@
+yfinance
+pandas
+numpy
+scipy
+statsmodels
+arch
+lightgbm
+torch
+shap
+matplotlib
