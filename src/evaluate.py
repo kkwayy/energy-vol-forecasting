@@ -33,6 +33,8 @@ def results_table(forecasts: dict[str, pd.Series], realised: pd.Series, horizon:
     raise NotImplementedError
 
 
+
+
 if __name__ == "__main__":
     from src import data, features, config
     from src.models import benchmarks
@@ -51,9 +53,16 @@ if __name__ == "__main__":
             loss_naive = qlike(actual, naive)
             stat, p = diebold_mariano(loss_har, loss_naive, h)
 
+            garch = benchmarks.garch_walkforward(panel[f"{asset}_ret"], panel[f"{asset}_gk"], y.index,
+                                                 config.FIRST_TEST_YEAR, config.VALIDATION_YEARS, h)
+            loss_garch = qlike(actual, garch.loc[har.index])
+            stat_g, p_g = diebold_mariano(loss_garch, loss_har, h)
+
             rows.append({"asset": asset, "h": h,
                          "QLIKE_HAR": loss_har.mean(), "QLIKE_naive": loss_naive.mean(),
-                         "DM": stat, "p": p})
+                         "DM_HAR_vs_naive": stat, "p_naive": p,
+                         "QLIKE_GARCH": loss_garch.mean(),
+                         "DM_GARCH_vs_HAR": stat_g, "p_GARCH": p_g})
 
     table = pd.DataFrame(rows)
     print(table.round(3).to_string(index=False))

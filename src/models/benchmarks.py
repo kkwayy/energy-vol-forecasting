@@ -3,6 +3,9 @@
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
+
+from arch import arch_model
+from src.walkforward import yearly_splits
 class HAR:
     """Linear regression of future vol on HAR terms (statsmodels OLS).
 
@@ -35,24 +38,38 @@ class HAR:
 
         return np.exp(log_pred + self.resid_var / 2)
 
-class GARCH:
-    """GARCH(1,1) on daily returns (arch package), forecasting average variance over the horizon.
+def garch_walkforward(returns: pd.Series, gk_var: pd.Series, target_index: pd.DatetimeIndex,
+                          first_test_year: int, val_years: int, horizon: int,
+                          calibrate: bool = True) -> pd.Series:
+    """GARCH(1,1) forecasts of average daily return variance over the next `horizon` days,
+    one test year at a time. Parameters are fitted only on data before each test year."""
+    r = returns.dropna() * 100
 
-    Note: works on returns, not on the feature matrix — needs its own interface into walk-forward.
-    TODO: scale returns (e.g. x100) before fitting for numerical stability.
-    """
+    am = arch_model(r, mean="Constant",vol="GARCH",p=1,q=1)
+    predictions =[]
+    for _, _, test in yearly_splits(target_index,first_test_year,val_years,horizon):
+        res = am.fit(last_obs=test[0],disp="off")
+        fc = res.forecast(horizon=horizon, start=test[0], reindex=False)
+        var = fc.variance.mean(axis=1) / 10_000          # 1. forecast in decimal units
 
-    def __init__(self, horizon: int):
-        self.horizon = horizon
+        if calibrate:                                     # 2. then rescale it
+            past_gk = gk_var.loc[:test[0]].iloc[:-1]
+            past_r2 = returns.loc[:test[0]].iloc[:-1] ** 2
+            scale = past_gk.mean() / past_r2.mean()
+            var = var * scale
 
-    def fit(self, returns: pd.Series) -> "GARCH":
-        raise NotImplementedError
 
-    def forecast(self, returns: pd.Series) -> pd.Series:
-        raise NotImplementedError
+        predictions.append(var.loc[test])
+
+
+    return pd.concat(predictions).rename("garch")
+
+
+
 if __name__ == "__main__":
-    from src import data, features
-    from src.walkforward import yearly_splits
+    from src import data, features, config
+    from src.walkforward import run_walkforward
+
 
     panel = pd.read_csv(data.PROCESSED_DIR / "panel.csv", index_col=0, parse_dates=True)
     X, y = features.build_dataset(panel, "WTI", 5)
@@ -61,6 +78,12 @@ if __name__ == "__main__":
     fit_idx = train.append(val)                                   # HAR has nothing to tune
     model = HAR().fit(X.loc[fit_idx], y.loc[fit_idx])
     print(model.result.params)
-
     pred = model.predict(X.loc[test])
     print(pd.DataFrame({"pred": pred, "actual": y.loc[test]}).head(10))
+    garch = garch_walkforward(panel["WTI_ret"], panel["WTI_gk"], y.index,
+                          config.FIRST_TEST_YEAR, config.VALIDATION_YEARS, 5)
+    print(garch.index.min(), garch.index.max(), len(garch), garch.index.is_unique)
+    print("mean GARCH forecast:", garch.mean(), "| mean target:", y.loc[garch.index].mean())
+    print("median GARCH / target:", (garch / y.loc[garch.index]).median())
+    har_pred = run_walkforward(HAR, X, y, config.FIRST_TEST_YEAR, config.VALIDATION_YEARS, 5)
+    print("median HAR / target:  ", (har_pred / y.loc[har_pred.index]).median())
