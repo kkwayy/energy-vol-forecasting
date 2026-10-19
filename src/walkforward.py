@@ -2,7 +2,8 @@
 
 from typing import Iterator
 import pandas as pd
-
+import matplotlib.pyplot as plt
+import  numpy as np
 
 
 def yearly_splits(index: pd.DatetimeIndex, first_test_year: int, val_years: int,horizon:int
@@ -74,3 +75,41 @@ if __name__ == "__main__":
     loss_avg = qlike(actual, lgbm_avg.loc[har.index])
     print("LGBM 5-seed average:", loss_avg.mean())
     print("DM (avg vs HAR):", diebold_mariano(loss_avg, loss_har, 5))
+
+    by_year = pd.DataFrame({
+        "HAR": loss_har,
+        "LGBM_seed0": loss_lgbm,
+        "LGBM_avg": loss_avg,
+    }).groupby(loss_har.index.year).mean()
+    print(by_year.round(3))
+
+    ret = panel["WTI_ret"]
+    yr = ret.index.year
+
+    summary = pd.DataFrame({
+        "total_ret": ret.groupby(yr).sum(),  # net price change for the year (log)
+        "gross_up": ret.clip(lower=0).groupby(yr).sum(),  # all the rises added up
+        "gross_down": ret.clip(upper=0).groupby(yr).sum(),  # all the falls added up
+    })
+    summary["lgbm_adv"] = (loss_har - loss_avg).groupby(loss_har.index.year).mean()  # > 0 means LightGBM better
+    summary = summary.loc[2012:]
+    print(summary.round(3))
+    print("correlation of advantage with total return:", summary["lgbm_adv"].corr(summary["total_ret"]).round(2))
+
+    def to_vol(s):  # daily variance -> annualised volatility
+        return np.sqrt(s * 252)
+
+
+    period = slice("2022-01-01", "2022-12-31")
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(to_vol(actual.loc[period]), label="Actual (next 5 days)", color="black", linewidth=1)
+    ax.plot(to_vol(har.loc[period]), label="HAR forecast")
+    ax.plot(to_vol(lgbm_avg.loc[period]), label="LightGBM forecast (5-seed avg)")
+    ax.plot(to_vol(X.loc[period, "ovx_var"]), label="OVX (implied)", linestyle="--", alpha=0.6)
+
+    ax.set_title("WTI, h = 5: forecasts vs actual, 2022")
+    ax.set_ylabel("Annualised volatility")
+    ax.legend()
+    fig.savefig(data.PROCESSED_DIR.parents[1] / "results" / "figures" / "forecasts_2022.png", dpi=150)
+    plt.show()

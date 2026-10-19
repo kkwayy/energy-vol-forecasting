@@ -53,6 +53,11 @@ def shap_summary(model: LGBMVol, X: pd.DataFrame, periods: dict[str, tuple[str, 
     """Mean |SHAP| per feature, overall and per period (e.g. calm, 2020, 2022)."""
     raise NotImplementedError
 
+def lgbm_seed_average(X, y, first_test_year, val_years, horizon, n_seeds=5):
+    preds = [run_walkforward(lambda s=s: LGBMVol(seed=s), X, y,
+                             first_test_year, val_years, horizon, use_val=True)
+             for s in range(n_seeds)]
+    return pd.concat(preds, axis=1).mean(axis=1).rename("lgbm")
 
 if __name__ == "__main__":
     from src import data, features
