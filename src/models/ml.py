@@ -4,6 +4,13 @@
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
+from src.models.benchmarks import HAR
+from src.walkforward import run_walkforward
+
+
+
+HAR_COLS = ["har_d", "har_w", "har_m"]
+
 
 PARAMS = {
     "objective": "regression",
@@ -26,16 +33,21 @@ class LGBMVol:
     - set a fixed seed per run
     """
 
-    def __init__(self, params: dict | None = None, seed: int = 0):
+    def __init__(self, params: dict | None = None, seed: int = 0,anchor: str="har_m"):
         self.params = params or {}
         self.seed = seed
+        self.anchor = anchor
 
     def fit(self, X_train, y_train, X_val, y_val) -> "LGBMVol":
         # target = log of future variance relative to the past month's level
-        y_tr = np.log(y_train) - np.log(X_train["har_m"])
-        y_va = np.log(y_val) - np.log(X_val["har_m"])
 
-        self.model = lgb.LGBMRegressor(**PARAMS, random_state=self.seed)
+        if self.anchor == "har":
+            self.har = HAR().fit(X_train[HAR_COLS], y_train)  # train rows only
+
+        y_tr = np.log(y_train) - self._log_base(X_train)
+        y_va = np.log(y_val) - self._log_base(X_val)
+
+        self.model = lgb.LGBMRegressor(**{**PARAMS, **self.params}, random_state=self.seed)
         self.model.fit(
             X_train, y_tr,
             eval_X=X_val, eval_y=y_va,
@@ -46,30 +58,43 @@ class LGBMVol:
         return self
 
     def predict(self, X) -> pd.Series:
-        log_pred = self.model.predict(X) + np.log(X["har_m"])
+        log_pred = self.model.predict(X) + self._log_base(X)
         return pd.Series(np.exp(log_pred + self.resid_var / 2), index=X.index)
+
+
+    def _log_base(self, X):
+        if self.anchor == "har":
+            return np.log(self.har.predict(X[HAR_COLS]))
+        return np.log(X["har_m"])
 
 def shap_summary(model: LGBMVol, X: pd.DataFrame, periods: dict[str, tuple[str, str]]) -> pd.DataFrame:
     """Mean |SHAP| per feature, overall and per period (e.g. calm, 2020, 2022)."""
     raise NotImplementedError
 
-def lgbm_seed_average(X, y, first_test_year, val_years, horizon, n_seeds=5):
-    preds = [run_walkforward(lambda s=s: LGBMVol(seed=s), X, y,
+def lgbm_seed_average(X, y, first_test_year, val_years, horizon, n_seeds=5, anchor="har_m"):
+    preds = [run_walkforward(lambda s=s: LGBMVol(seed=s, anchor=anchor), X, y,
                              first_test_year, val_years, horizon, use_val=True)
              for s in range(n_seeds)]
-    return pd.concat(preds, axis=1).mean(axis=1).rename("lgbm")
+    return pd.concat(preds, axis=1).mean(axis=1).rename(f"lgbm_{anchor}")
+
 
 if __name__ == "__main__":
     from src import data, features
-    from src.walkforward import yearly_splits
+    from src.evaluate import qlike, diebold_mariano
 
     panel = pd.read_csv(data.PROCESSED_DIR / "panel.csv", index_col=0, parse_dates=True)
     X, y = features.build_dataset(panel, "WTI", 5, extra=True)
 
-    train, val, test = next(yearly_splits(X.index, 2012, 1, 5))
-    model = LGBMVol(seed=0).fit(X.loc[train], y.loc[train], X.loc[val], y.loc[val])
+    har = run_walkforward(HAR, X[HAR_COLS], y, 2012, 1, 5)
+    actual = y.loc[har.index]
+    loss_har = qlike(actual, har)
 
-    print("trees used:", model.model.best_iteration_)
-    print("resid var:", model.resid_var)
-    pred = model.predict(X.loc[test])
-    print(pd.DataFrame({"pred": pred, "actual": y.loc[test]}).head(10))
+    results = {"HAR": loss_har}
+    for anchor in ["har_m", "har"]:
+        avg = lgbm_seed_average(X, y, 2012, 1, 5, anchor=anchor)
+        loss = qlike(actual, avg.loc[har.index])
+        stat, p = diebold_mariano(loss, loss_har, 5)
+        print(f"{anchor:6s} QLIKE {loss.mean():.4f} | DM vs HAR {stat:.2f}, p {p:.3f}")
+        results[f"LGBM_{anchor}"] = loss
+
+    print(pd.DataFrame(results).groupby(loss_har.index.year).mean().round(3))

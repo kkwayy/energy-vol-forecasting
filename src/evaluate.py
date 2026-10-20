@@ -34,10 +34,10 @@ def results_table(forecasts: dict[str, pd.Series], realised: pd.Series, horizon:
 
 
 
-
 if __name__ == "__main__":
     from src import data, features, config
     from src.models import benchmarks
+    from src.models.ml import lgbm_seed_average          # NEW
     from src.walkforward import run_walkforward
 
     panel = pd.read_csv(data.PROCESSED_DIR / "panel.csv", index_col=0, parse_dates=True)
@@ -58,11 +58,21 @@ if __name__ == "__main__":
             loss_garch = qlike(actual, garch.loc[har.index])
             stat_g, p_g = diebold_mariano(loss_garch, loss_har, h)
 
+            # NEW: HAR-anchored LightGBM, 5-seed average
+            X_full, _ = features.build_dataset(panel, asset, h, extra=True)
+            lgbm = lgbm_seed_average(X_full, y, config.FIRST_TEST_YEAR, config.VALIDATION_YEARS, h, anchor="har")
+            loss_lgbm = qlike(actual, lgbm.loc[har.index])
+            stat_l, p_l = diebold_mariano(loss_lgbm, loss_har, h)
+            print(f"done: {asset} h={h}")                  # progress, since this is slow
+
             rows.append({"asset": asset, "h": h,
                          "QLIKE_HAR": loss_har.mean(), "QLIKE_naive": loss_naive.mean(),
                          "DM_HAR_vs_naive": stat, "p_naive": p,
                          "QLIKE_GARCH": loss_garch.mean(),
-                         "DM_GARCH_vs_HAR": stat_g, "p_GARCH": p_g})
+                         "DM_GARCH_vs_HAR": stat_g, "p_GARCH": p_g,
+                         "QLIKE_LGBM": loss_lgbm.mean(),               # NEW
+                         "DM_LGBM_vs_HAR": stat_l, "p_LGBM": p_l})     # NEW
 
     table = pd.DataFrame(rows)
     print(table.round(3).to_string(index=False))
+    table.to_csv(data.PROCESSED_DIR.parents[1] / "results" / "benchmarks_and_lgbm.csv", index=False)
