@@ -63,16 +63,36 @@ if __name__ == "__main__":
             lgbm = lgbm_seed_average(X_full, y, config.FIRST_TEST_YEAR, config.VALIDATION_YEARS, h, anchor="har")
             loss_lgbm = qlike(actual, lgbm.loc[har.index])
             stat_l, p_l = diebold_mariano(loss_lgbm, loss_har, h)
-            print(f"done: {asset} h={h}")                  # progress, since this is slow
 
-            rows.append({"asset": asset, "h": h,
+            # HAR-IV: HAR + log OVX implied variance (linear)
+            harx = run_walkforward(benchmarks.HAR, X_full[["har_d", "har_w", "har_m", "ovx_var"]], y,
+                                   config.FIRST_TEST_YEAR, config.VALIDATION_YEARS, h)
+            loss_harx = qlike(actual, harx.loc[har.index])
+            stat_x, p_x = diebold_mariano(loss_harx, loss_har, h)  # HAR-IV vs HAR
+            stat_lx, p_lx = diebold_mariano(loss_lgbm, loss_harx, h)  # LightGBM vs HAR-IV
+
+            # save all forecasts for later analysis
+            fc = pd.DataFrame({"actual": actual, "HAR": har, "naive": naive,
+                               "GARCH": garch.loc[har.index], "LGBM": lgbm.loc[har.index],
+                               "HARX": harx.loc[har.index]})
+            out_dir = data.PROCESSED_DIR.parents[1] / "results" / "forecasts"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            fc.to_csv(out_dir / f"{asset}_h{h}.csv")
+            print(f"done: {asset} h={h}")
+
+            rows.append({"asset": asset, "h":    h,
                          "QLIKE_HAR": loss_har.mean(), "QLIKE_naive": loss_naive.mean(),
                          "DM_HAR_vs_naive": stat, "p_naive": p,
                          "QLIKE_GARCH": loss_garch.mean(),
                          "DM_GARCH_vs_HAR": stat_g, "p_GARCH": p_g,
-                         "QLIKE_LGBM": loss_lgbm.mean(),               # NEW
-                         "DM_LGBM_vs_HAR": stat_l, "p_LGBM": p_l})     # NEW
+                         "QLIKE_LGBM": loss_lgbm.mean(),
+                         "DM_LGBM_vs_HAR": stat_l, "p_LGBM": p_l,
+                         "QLIKE_HARX": loss_harx.mean(),
+                         "DM_HARX_vs_HAR": stat_x, "p_HARX": p_x,
+                         "DM_LGBM_vs_HARX": stat_lx, "p_LGBM_vs_HARX": p_lx})
 
     table = pd.DataFrame(rows)
-    print(table.round(3).to_string(index=False))
+
+    print(table[["asset", "h", "QLIKE_HAR", "QLIKE_HARX", "QLIKE_LGBM",
+                 "DM_HARX_vs_HAR", "p_HARX", "DM_LGBM_vs_HARX", "p_LGBM_vs_HARX"]].round(3).to_string(index=False))
     table.to_csv(data.PROCESSED_DIR.parents[1] / "results" / "benchmarks_and_lgbm.csv", index=False)

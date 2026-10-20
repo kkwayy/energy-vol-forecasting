@@ -7,7 +7,8 @@ import lightgbm as lgb
 from src.models.benchmarks import HAR
 from src.walkforward import run_walkforward
 
-
+import shap
+from src.walkforward import yearly_splits
 
 HAR_COLS = ["har_d", "har_w", "har_m"]
 
@@ -77,6 +78,15 @@ def lgbm_seed_average(X, y, first_test_year, val_years, horizon, n_seeds=5, anch
              for s in range(n_seeds)]
     return pd.concat(preds, axis=1).mean(axis=1).rename(f"lgbm_{anchor}")
 
+def walkforward_shap(X, y, first_test_year, val_years, horizon, seed=0, anchor="har"):
+    """SHAP values for every test day: refit one model per test year (as in the walk-forward)
+    and explain its forecasts on that year's test rows."""
+    frames = []
+    for train, val, test in yearly_splits(X.index, first_test_year, val_years, horizon):
+        m = LGBMVol(seed=seed, anchor=anchor).fit(X.loc[train], y.loc[train], X.loc[val], y.loc[val])
+        sv = shap.TreeExplainer(m.model).shap_values(X.loc[test])
+        frames.append(pd.DataFrame(sv, index=test, columns=X.columns))
+    return pd.concat(frames)
 
 if __name__ == "__main__":
     from src import data, features
@@ -96,5 +106,14 @@ if __name__ == "__main__":
         stat, p = diebold_mariano(loss, loss_har, 5)
         print(f"{anchor:6s} QLIKE {loss.mean():.4f} | DM vs HAR {stat:.2f}, p {p:.3f}")
         results[f"LGBM_{anchor}"] = loss
+
+    importance = {}
+    for h in [1, 22]:
+        X_h, y_h = features.build_dataset(panel, "WTI", h, extra=True)
+        sv = walkforward_shap(X_h, y_h, 2012, 1, h)
+        importance[f"h={h}"] = sv.abs().mean()
+
+    imp = pd.DataFrame(importance).sort_values("h=1", ascending=False)
+    print(imp.round(4))
 
     print(pd.DataFrame(results).groupby(loss_har.index.year).mean().round(3))
